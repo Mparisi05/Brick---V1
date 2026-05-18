@@ -190,6 +190,45 @@
   .view { display: none; }
   .view.active { display: block; }
 
+  /* ========= TOTALS BAR (Board view) ========= */
+  .totals-bar {
+    display: flex; gap: 12px; margin-bottom: 18px;
+    flex-wrap: wrap;
+  }
+  .total-card {
+    flex: 1; min-width: 160px;
+    background: var(--bg-card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 12px 16px;
+    display: flex; align-items: baseline; justify-content: space-between;
+    position: relative; overflow: hidden;
+  }
+  .total-card::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  }
+  .total-card.all::before      { background: var(--accent); }
+  .total-card.work::before     { background: var(--work); }
+  .total-card.personal::before { background: var(--personal); }
+  .total-label {
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--ink-faint); font-weight: 600;
+  }
+  .total-value {
+    font-family: var(--font-display); font-weight: 600;
+    font-size: 22px; letter-spacing: -0.01em; color: var(--ink);
+  }
+  .total-meta {
+    font-size: 11px; color: var(--ink-faint); margin-top: 2px;
+  }
+  .total-card .total-stack { display: flex; flex-direction: column; gap: 0; }
+
+  /* Urgency view: time pill in column header */
+  .col-time {
+    font-size: 11px; color: var(--ink-soft); font-variant-numeric: tabular-nums;
+    background: var(--bg-card); padding: 2px 8px; border-radius: 10px;
+    border: 1px solid var(--line-soft);
+  }
+  .urgency .col-head { gap: 6px; flex-wrap: wrap; }
+
   /* ========= BOARD / URGENCY GRID ========= */
   .board {
     display: grid;
@@ -235,6 +274,10 @@
   .task-tile.drop-below { box-shadow: 0 3px 0 var(--accent); }
   .task-tile.completed { opacity: 0.55; background: var(--bg); }
   .task-tile.completed .task-name { text-decoration: line-through; color: var(--ink-faint); }
+  /* Category-driven background tints */
+  .task-tile.cat-personal { background: #f3edf6; border-color: #d9cde2; }
+  .task-tile.cat-personal:hover { border-color: var(--personal); }
+  .task-tile.cat-personal.completed { background: #ebe4ef; }
   /* Category accent stripe on left edge */
   .task-tile::before {
     content: ''; position: absolute; left: 0; top: 6px; bottom: 6px;
@@ -491,7 +534,10 @@
   </section>
 
   <main class="main">
-    <section id="view-board" class="view active"><div class="board" id="boardEl"></div></section>
+    <section id="view-board" class="view active">
+      <div class="totals-bar" id="totalsBarEl"></div>
+      <div class="board" id="boardEl"></div>
+    </section>
     <section id="view-urgency" class="view"><div class="urgency" id="urgencyEl"></div></section>
     <section id="view-projects" class="view"><div class="projects-grid" id="projectsEl"></div></section>
   </main>
@@ -503,7 +549,7 @@
 /* ============================================================
    CONFIG — set this to your deployed Apps Script Web App URL
    ============================================================ */
-const API_URL = 'https://script.google.com/macros/s/AKfycbxz_NetuDdkLXtbWobSPQ75q3lbCc5iq7Kz0AZzBTVTpoTeBjDFWHTUUPm7MZhqauI8/exec';
+const API_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
 
 /* ============================================================
    STATE
@@ -611,9 +657,34 @@ async function refresh() {
 function renderAll() {
   applyCategoryClassToBody();
   renderProjectSelect();
+  renderTotalsBar();
   renderBoard();
   renderUrgency();
   renderProjects();
+}
+
+function renderTotalsBar() {
+  const el = document.getElementById('totalsBarEl');
+  if (!el) return;
+  // ALWAYS show all three totals regardless of master filter
+  const all      = sumOpenMinutes(state.tasks);
+  const work     = sumOpenMinutes(state.tasks.filter(t => normalizeCategory(t.Category) === 'work'));
+  const personal = sumOpenMinutes(state.tasks.filter(t => normalizeCategory(t.Category) === 'personal'));
+
+  const card = (cls, label, data) => {
+    const untimedNote = data.untimed > 0 ? ` <span style="color:var(--ink-faint);font-weight:400;">(+${data.untimed} untimed)</span>` : '';
+    return `
+      <div class="total-card ${cls}">
+        <div class="total-stack">
+          <span class="total-label">${label}</span>
+          <span class="total-value">${formatMinutes(data.total)}</span>
+        </div>
+        <span class="total-meta">${untimedNote}</span>
+      </div>
+    `;
+  };
+
+  el.innerHTML = card('all', 'All open', all) + card('work', 'Work', work) + card('personal', 'Personal', personal);
 }
 
 function applyCategoryClassToBody() {
@@ -757,7 +828,13 @@ function renderBoard() {
   el.innerHTML = BUCKETS.map(bucket => {
     const inBucket = tasks
       .filter(t => taskBucket(t) === bucket)
-      .sort((a, b) => (parseInt(a.SortOrder, 10) || 0) - (parseInt(b.SortOrder, 10) || 0));
+      .sort((a, b) => {
+        // Completed tasks always at the bottom; otherwise sort by SortOrder ascending
+        const ac = a.Status === 'completed' ? 1 : 0;
+        const bc = b.Status === 'completed' ? 1 : 0;
+        if (ac !== bc) return ac - bc;
+        return (parseInt(a.SortOrder, 10) || 0) - (parseInt(b.SortOrder, 10) || 0);
+      });
     const openInBucket = inBucket.filter(t => t.Status !== 'completed');
     return `
       <div class="col" data-bucket="${bucket === null ? '' : bucket}">
@@ -969,17 +1046,24 @@ function renderUrgency() {
     { key: 'none',    label: 'No Date' }
   ];
 
-  el.innerHTML = cols.map(c => `
+  el.innerHTML = cols.map(c => {
+    const colSum = sumOpenMinutes(buckets[c.key]);
+    const timeBadge = colSum.total > 0 || colSum.untimed > 0
+      ? `<span class="col-time">${formatMinutes(colSum.total)}${colSum.untimed > 0 ? ` +${colSum.untimed}` : ''}</span>`
+      : '';
+    return `
     <div class="col">
       <div class="col-head">
         <span class="col-label ${c.className || ''}">${c.label}</span>
+        ${timeBadge}
         <span class="col-count">${buckets[c.key].length}</span>
       </div>
       <div class="col-tasks">
         ${buckets[c.key].map(renderTaskTile).join('') || '<div class="empty">—</div>'}
       </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
 
   bindTaskTileEvents();
 }
@@ -1264,6 +1348,29 @@ function normalizeCategory(c) {
   if (!c) return null;
   const lower = c.toString().toLowerCase().trim();
   return (lower === 'work' || lower === 'personal') ? lower : null;
+}
+
+function formatMinutes(totalMin) {
+  // Always show as hours + minutes, e.g. "3h 45m", "45m", "2h", or "0m"
+  const m = parseInt(totalMin, 10);
+  if (!m || isNaN(m) || m < 0) return '0m';
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  if (h === 0) return `${rem}m`;
+  if (rem === 0) return `${h}h`;
+  return `${h}h ${rem}m`;
+}
+
+function sumOpenMinutes(tasks) {
+  // Returns total minutes + count of untimed open tasks
+  let total = 0, untimed = 0;
+  tasks.forEach(t => {
+    if (t.Status === 'completed') return;
+    const m = parseInt(t.Minutes, 10);
+    if (!m || isNaN(m)) untimed++;
+    else total += m;
+  });
+  return { total, untimed };
 }
 
 function startOfDay(d) {
